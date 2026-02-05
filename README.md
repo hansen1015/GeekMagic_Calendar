@@ -41,10 +41,13 @@ The ESP8266 cannot handle the full Google API OAuth flow. We use a lightweight "
 ### Part 2: Firmware (The Device)
 1.  Open this project in **VS Code** with **PlatformIO**.
 2.  Open `src/main.cpp`.
-3.  Find line: `const char* GOOGLE_SCRIPT_URL = "..."`
-4.  Paste your Google Web App URL there.
-5.  Connect your device via USB.
-6.  Click **PlatformIO: Upload**.
+3.  Find the line: `const char* GOOGLE_SCRIPT_URL = "..."`
+4.  Paste your Google Web App URL inside the quotes.
+5.  Click the **Checkmark (✓)** icon in the bottom PlatformIO bar to **Build** (Compile) the project.
+    * *Note: You do not need to plug the device in.*
+6.  Once built, locate the file: `.pio/build/esp12e/firmware.bin`.
+7.  Open your GeekMagic's dashboard in a web browser (e.g., `http://<DEVICE_IP>`).
+8.  In the **Update Firmware** section, select the `firmware.bin` file and click **Upload**.
 
 ## ⚙️ Usage
 
