@@ -1,5 +1,5 @@
 # GeekMagic SmallTV-Ultra Calendar 📅
-
+![GeekMagic Calendar Preview](preview.jpg)
 A highly optimized Google Calendar display firmware for the **GeekMagic SmallTV-Ultra** (ESP8266 version). 
 
 This project transforms the gadget into a desk companion that shows your next **8 upcoming events** with their original Google Calendar colors, along with a live clock and date. It includes a web dashboard for configuring settings and performing wireless updates.
