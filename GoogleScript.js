@@ -50,7 +50,7 @@ function doGet(e) {
       "t": evt.getTitle(),
       "d": dateStr,
       "c": rgb565,
-      "isDark": (cId === "8" || cId === "9" || cId === "10" || cId === "11" || cId === "3" || cId === "7") 
+      "isDark": (cId === "8" || cId === "9" || cId === "10" || cId === "11" || cId === "3") 
     });
   }
 

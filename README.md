@@ -23,6 +23,7 @@ This project transforms the gadget into a desk companion that shows your next **
 
 * **Device:** GeekMagic SmallTV-Ultra (ESP8266 / ESP-12F)
 * **Screen:** 1.54" IPS TFT (ST7789 Driver)
+* **Where to buy:** [AliExpress Link](https://www.aliexpress.com/item/1005006159850972.html)
 
 ## 🚀 Installation
 

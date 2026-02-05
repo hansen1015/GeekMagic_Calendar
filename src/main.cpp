@@ -11,7 +11,7 @@
 #include <Updater.h> 
 
 // --- CONFIGURATION ---
-const char* GOOGLE_SCRIPT_URL = "Change here"; 
+const char* GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/changethis/exec"; 
 
 TFT_eSPI tft = TFT_eSPI();
 ESP8266WebServer server(80);
@@ -31,12 +31,6 @@ long gmtOffset = 28800;
 int brightness = 100; 
 
 void applyBrightness() {
-  // HARDWARE FIX:
-  // Your backlight turns off if duty > 250.
-  // We clamp the range to 0 (Brightest) -> 240 (Dimmest Visible).
-  // This ensures 1% brightness is still visible, not black.
-  
-  // Map 0-100 Slider to 240-0 Duty Cycle
   int duty = map(brightness, 0, 100, 240, 0);
   analogWrite(TFT_BL, duty);
 }
@@ -53,13 +47,10 @@ void loadSettings() {
   EEPROM.begin(512);
   long tempOffset;
   int tempBright;
-  
   EEPROM.get(0, tempOffset);
   EEPROM.get(10, tempBright);
-  
   if (tempOffset > -43200 && tempOffset < 50400) gmtOffset = tempOffset;
   if (tempBright >= 0 && tempBright <= 100) brightness = tempBright;
-  
   EEPROM.end();
 }
 
@@ -71,15 +62,11 @@ String getHtml() {
   html += "input[type=number]{padding:8px; width:100px;}";
   html += "input[type=range]{width:100%;}";
   html += "</style></head><body><h2>GeekMagic Control</h2>";
-  
   html += "<div class='card'><h3>Settings</h3><form action='/set' method='POST'>";
   html += "Timezone Offset: <input type='number' name='offset' value='" + String(gmtOffset) + "'><br><br>";
-  
   html += "Brightness (" + String(brightness) + "%): <br>";
   html += "<input type='range' name='bright' min='0' max='100' value='" + String(brightness) + "' onchange='this.form.submit()'><br><br>";
-  
   html += "<input type='submit' value='Save' class='btn'></form></div>";
-  
   html += "<div class='card'><h3>Update Firmware</h3>";
   html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
   html += "<input type='file' name='update' style='color:#fff'><br><br>";
@@ -96,19 +83,26 @@ void drawUI() {
       int col = i / 4; 
       int row = i % 4; 
       int x = (col * 120) + 3; 
-      int y = 34 + (row * 49); 
+      int y = 32 + (row * 52); 
       
-      tft.fillRoundRect(x, y, 114, 45, 6, events[i].color);
+      tft.fillRoundRect(x, y, 114, 50, 6, events[i].color);
       
+      // Determine Text Color (White or Black)
       uint16_t textColor = events[i].isDark ? TFT_WHITE : TFT_BLACK;
-      uint16_t timeColor = events[i].isDark ? 0xCE79 : 0x3186; 
 
-      tft.setTextColor(textColor, events[i].color);
+      // 1. TITLE
+      tft.setTextColor(textColor, events[i].color); // Use Pure Color
       tft.setTextDatum(TL_DATUM); 
-      tft.drawString(events[i].title.substring(0, 11), x + 5, y + 4, 2);
       
-      tft.setTextColor(timeColor, events[i].color);
-      tft.drawString(events[i].displayTime, x + 5, y + 26, 2);
+      String t = events[i].title.substring(0, 8); 
+      // MOVED DOWN: y+4 (was y+2)
+      tft.drawString(t, x + 4, y + 4, 4); 
+      
+      // 2. TIME
+      tft.setTextColor(textColor, events[i].color); // Use Same Pure Color
+      
+      // MOVED DOWN: y+30 (was y+28) to avoid overlapping the lower title
+      tft.drawString(events[i].displayTime, x + 5, y + 30, 2);
     }
   }
 }
@@ -151,7 +145,6 @@ void fetchCalendar() {
     if (httpCode > 0) {
       String payload = https.getString();
       https.end(); 
-      
       DynamicJsonDocument doc(5120); 
       DeserializationError error = deserializeJson(doc, payload);
 
@@ -159,7 +152,6 @@ void fetchCalendar() {
         JsonArray array = doc.as<JsonArray>();
         int count = 0;
         for(int k=0; k<8; k++) events[k].title = ""; 
-
         for(JsonObject v : array) {
           if(count >= 8) break;
           events[count].title = v["t"].as<String>();
@@ -184,14 +176,11 @@ void fetchCalendar() {
 void setup() {
   Serial.begin(115200);
   loadSettings();
-
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
-  
   pinMode(TFT_BL, OUTPUT);
   applyBrightness(); 
-
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Connecting...", 120, 120, 4);
@@ -203,19 +192,14 @@ void setup() {
   configTime(gmtOffset, 0, "pool.ntp.org", "time.google.com");
 
   server.on("/", []() { server.send(200, "text/html", getHtml()); });
-  
   server.on("/set", HTTP_POST, []() {
       if (server.hasArg("offset")) gmtOffset = server.arg("offset").toInt();
       if (server.hasArg("bright")) brightness = server.arg("bright").toInt();
-      
       saveSettings();
       applyBrightness(); 
       configTime(gmtOffset, 0, "pool.ntp.org", "time.google.com");
-      
-      // AUTO RELOAD - No "Saved" page
       server.sendHeader("Location", "/");
       server.send(303);
-      
       drawClock();
   });
 
@@ -234,22 +218,18 @@ void setup() {
       else Update.printError(Serial);
     }
   });
-
   server.begin();
-
   drawUI();
   fetchCalendar();
 }
 
 void loop() {
   server.handleClient();
-
   static unsigned long lastClock = 0;
   if (millis() - lastClock > 1000) {
     lastClock = millis();
     drawClock();
   }
-
   if (millis() - lastFetchTime > fetchInterval) {
     lastFetchTime = millis();
     fetchCalendar();
