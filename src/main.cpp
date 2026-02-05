@@ -11,7 +11,7 @@
 #include <Updater.h> 
 
 // --- CONFIGURATION ---
-const char* GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwf7wY7nHuaymoihFwHGfdroyrNkLPzD7QaZp2WEd9SVWY20mkTGLLqiWDwKq-sbhJ5/exec"; 
+const char* GOOGLE_SCRIPT_URL = "Change here"; 
 
 TFT_eSPI tft = TFT_eSPI();
 ESP8266WebServer server(80);
