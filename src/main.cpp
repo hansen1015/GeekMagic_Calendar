@@ -11,7 +11,13 @@
 #include <Updater.h> 
 
 // --- CONFIGURATION ---
-const char* GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/changethis/exec"; 
+// Put your real URL in include/secrets.h (git-ignored): #define GOOGLE_SCRIPT_URL_SECRET "https://..."
+#if __has_include("secrets.h")
+#include "secrets.h"
+const char* GOOGLE_SCRIPT_URL = GOOGLE_SCRIPT_URL_SECRET;
+#else
+const char* GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/changethis/exec";
+#endif
 
 TFT_eSPI tft = TFT_eSPI();
 ESP8266WebServer server(80);
@@ -29,6 +35,20 @@ Event events[8];
 
 long gmtOffset = 28800; 
 int brightness = 100; 
+
+// --- NTP TIME ---
+const char* NTP_SERVER_1 = "time.google.com";
+const char* NTP_SERVER_2 = "time.cloudflare.com";
+const char* NTP_SERVER_3 = "pool.ntp.org";
+const time_t MIN_VALID_TIME = 1700000000; // anything earlier means NTP has not synced yet
+
+bool timeIsSynced() {
+  return time(nullptr) > MIN_VALID_TIME;
+}
+
+void startNtp() {
+  configTime(gmtOffset, 0, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+}
 
 void applyBrightness() {
   int duty = map(brightness, 0, 100, 240, 0);
@@ -115,12 +135,17 @@ void drawError(String msg) {
 }
 
 void drawClock() {
-  time_t now = time(nullptr);
-  struct tm* p_tm = localtime(&now);
   char timeStr[10];
-  sprintf(timeStr, "%02d:%02d", p_tm->tm_hour, p_tm->tm_min);
   char dateStr[20];
-  strftime(dateStr, sizeof(dateStr), "%b %d", p_tm);
+  if (timeIsSynced()) {
+    time_t now = time(nullptr);
+    struct tm* p_tm = localtime(&now);
+    sprintf(timeStr, "%02d:%02d", p_tm->tm_hour, p_tm->tm_min);
+    strftime(dateStr, sizeof(dateStr), "%b %d", p_tm);
+  } else {
+    strcpy(timeStr, "--:--");
+    strcpy(dateStr, "Syncing");
+  }
 
   tft.fillRect(0, 0, 240, 30, 0x18E3); 
   tft.setTextColor(TFT_WHITE, 0x18E3);
@@ -186,10 +211,27 @@ void setup() {
   tft.drawString("Connecting...", 120, 120, 4);
 
   WiFiManager wifiManager;
+  wifiManager.setConnectTimeout(10);
+  wifiManager.setAPCallback([](WiFiManager*) {
+    // Saved WiFi failed - device is now hosting its own setup network
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Setup WiFi", 120, 70, 4);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Join network:", 120, 120, 2);
+    tft.drawString("GeekMagic_Setup", 120, 145, 4);
+    tft.drawString("then open 192.168.4.1", 120, 185, 2);
+  });
   wifiManager.autoConnect("GeekMagic_Setup");
 
   tft.fillScreen(TFT_BLACK);
-  configTime(gmtOffset, 0, "pool.ntp.org", "time.google.com");
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Syncing time...", 120, 120, 4);
+  startNtp();
+  for (int i = 0; i < 80 && !timeIsSynced(); i++) delay(100); // wait up to 8s for NTP; loop() keeps retrying
+  tft.fillScreen(TFT_BLACK);
 
   server.on("/", []() { server.send(200, "text/html", getHtml()); });
   server.on("/set", HTTP_POST, []() {
@@ -197,15 +239,20 @@ void setup() {
       if (server.hasArg("bright")) brightness = server.arg("bright").toInt();
       saveSettings();
       applyBrightness(); 
-      configTime(gmtOffset, 0, "pool.ntp.org", "time.google.com");
+      startNtp();
       server.sendHeader("Location", "/");
       server.send(303);
       drawClock();
   });
 
   server.on("/update", HTTP_POST, []() {
-    server.send(200, "text/plain", (Update.hasError()) ? "Update Failed" : "Update Success! Rebooting...");
-    ESP.restart();
+    bool failed = Update.hasError();
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", failed ? "Update Failed" : "Update Success! Rebooting...");
+    if (!failed) {
+      delay(500); // let the response flush before rebooting
+      ESP.restart();
+    }
   }, []() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
@@ -226,6 +273,11 @@ void setup() {
 void loop() {
   server.handleClient();
   static unsigned long lastClock = 0;
+  static unsigned long lastNtpRetry = 0;
+  if (!timeIsSynced() && WiFi.status() == WL_CONNECTED && millis() - lastNtpRetry > 30000) {
+    lastNtpRetry = millis();
+    startNtp(); // re-issue NTP request until the first sync succeeds
+  }
   if (millis() - lastClock > 1000) {
     lastClock = millis();
     drawClock();

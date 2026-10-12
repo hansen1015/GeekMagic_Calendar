@@ -3,3 +3,4 @@
 .cache
 **/*.bin
 **/*.elf
+include/secrets.h

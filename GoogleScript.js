@@ -7,20 +7,7 @@ function doGet(e) {
   var events = cal.getEvents(now, end);
   var result = [];
 
-  // OFFICIAL GOOGLE CALENDAR HEX CODES
-  var palette = {
-    "1": "#7986cb", // Lavender
-    "2": "#33b679", // Sage
-    "3": "#8e24aa", // Grape
-    "4": "#e67c73", // Flamingo
-    "5": "#f6c026", // Banana
-    "6": "#f5511d", // Tangerine
-    "7": "#039be5", // Peacock
-    "8": "#616161", // Graphite
-    "9": "#3f51b5", // Blueberry
-    "10": "#0b8043", // Basil
-    "11": "#d60000"  // Tomato
-  };
+  var palette = getPalette();
 
   var limit = Math.min(events.length, 8); 
 
@@ -29,7 +16,7 @@ function doGet(e) {
     var cId = evt.getColor();
     if (!cId) cId = "9"; 
 
-    var hex = palette[cId] || "#3f51b5";
+    var hex = palette[cId] || palette["9"];
     
     var r = parseInt(hex.substring(1, 3), 16);
     var g = parseInt(hex.substring(3, 5), 16);
@@ -50,10 +37,37 @@ function doGet(e) {
       "t": evt.getTitle(),
       "d": dateStr,
       "c": rgb565,
-      "isDark": (cId === "8" || cId === "9" || cId === "10" || cId === "11" || cId === "3") 
+      "isDark": isDarkColor(r, g, b)
     });
   }
 
   return ContentService.createTextOutput(JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// Fallback: classic Google Calendar event colours (ids 1-11)
+var DEFAULT_PALETTE = {
+  "1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73",
+  "5": "#f6c026", "6": "#f5511d", "7": "#039be5", "8": "#616161",
+  "9": "#3f51b5", "10": "#0b8043", "11": "#d60000"
+};
+
+// Loads every event colour Google currently offers (including newer ones) via the
+// Calendar advanced service (Services > + > Google Calendar API). Falls back to the
+// classic 11 colours if the service isn't enabled.
+function getPalette() {
+  var palette = {};
+  for (var k in DEFAULT_PALETTE) palette[k] = DEFAULT_PALETTE[k];
+  try {
+    var colors = Calendar.Colors.get().event;
+    for (var id in colors) palette[id] = colors[id].background;
+  } catch (err) {
+    // advanced service not enabled - keep defaults
+  }
+  return palette;
+}
+
+// Perceived brightness decides white vs black text
+function isDarkColor(r, g, b) {
+  return (0.299 * r + 0.587 * g + 0.114 * b) < 150;
 }
