@@ -8,7 +8,10 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <EEPROM.h>
-#include <Updater.h> 
+#include <Updater.h>
+#include <stdarg.h>
+#include <WiFiUdp.h>
+#include <sys/time.h>
 
 // --- CONFIGURATION ---
 // Put your real URL in include/secrets.h (git-ignored): #define GOOGLE_SCRIPT_URL_SECRET "https://..."
@@ -36,6 +39,33 @@ Event events[8];
 long gmtOffset = 28800; 
 int brightness = 100; 
 
+// --- LOGGING (ring buffer, readable at http://<ip>/log) ---
+#define LOG_SIZE 4096
+char logBuf[LOG_SIZE];
+size_t logLen = 0;
+
+void logf(const char* fmt, ...) {
+  char line[160];
+  int n = snprintf(line, sizeof(line), "[%8lu] ", millis());
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line + n, sizeof(line) - n - 2, fmt, ap);
+  va_end(ap);
+  strcat(line, "\n");
+  Serial.print(line);
+  size_t len = strlen(line);
+  if (logLen + len >= LOG_SIZE) { // drop oldest half
+    size_t keep = LOG_SIZE / 2;
+    memmove(logBuf, logBuf + logLen - keep, keep);
+    logLen = keep;
+  }
+  memcpy(logBuf + logLen, line, len);
+  logLen += len;
+  logBuf[logLen] = 0;
+}
+
+String lastFetchResult = "not yet";
+
 // --- NTP TIME ---
 const char* NTP_SERVER_1 = "time.google.com";
 const char* NTP_SERVER_2 = "time.cloudflare.com";
@@ -44,6 +74,62 @@ const time_t MIN_VALID_TIME = 1700000000; // anything earlier means NTP has not 
 
 bool timeIsSynced() {
   return time(nullptr) > MIN_VALID_TIME;
+}
+
+// Fallback when NTP is blocked/slow: set the clock from an HTTP "Date" header (UTC)
+bool setTimeFromHttpDate(const String& d) {
+  static const char* mon = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  int day, year, hh, mm, ss; char m[4] = {0};
+  if (sscanf(d.c_str(), "%*3s, %d %3s %d %d:%d:%d", &day, m, &year, &hh, &mm, &ss) != 6) return false;
+  const char* f = strstr(mon, m);
+  if (!f) return false;
+  int month = (f - mon) / 3 + 1;
+  // days since 1970-01-01 (civil-from-days algorithm)
+  int y = year - (month <= 2);
+  int era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = y - era * 400;
+  unsigned doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = (long)era * 146097 + (long)doe - 719468;
+  struct timeval tv = { (time_t)(days * 86400L + hh * 3600L + mm * 60L + ss), 0 };
+  settimeofday(&tv, nullptr);
+  return true;
+}
+
+// Direct UDP NTP query: fast, and logs why it fails (lwIP's SNTP gave no feedback)
+bool ntpOk = false; // true once a real NTP reply was received
+
+bool ntpQuery(const char* host) {
+  IPAddress ip;
+  unsigned long t0 = millis();
+  if (!WiFi.hostByName(host, ip, 2000)) { logf("NTP: DNS failed for %s", host); return false; }
+  WiFiUDP udp;
+  udp.begin(2390);
+  uint8_t pkt[48] = {0};
+  pkt[0] = 0x1B; // LI=0, v3, client mode
+  udp.beginPacket(ip, 123);
+  udp.write(pkt, 48);
+  udp.endPacket();
+  for (int i = 0; i < 20; i++) { // up to 2s
+    delay(100);
+    if (udp.parsePacket() >= 48) {
+      udp.read(pkt, 48);
+      udp.stop();
+      uint32_t secs = ((uint32_t)pkt[40] << 24) | (pkt[41] << 16) | (pkt[42] << 8) | pkt[43];
+      struct timeval tv = { (time_t)(secs - 2208988800UL), 0 };
+      settimeofday(&tv, nullptr);
+      ntpOk = true;
+      logf("NTP: %s (%s) ok in %lu ms", host, ip.toString().c_str(), millis() - t0);
+      return true;
+    }
+  }
+  udp.stop();
+  logf("NTP: %s (%s) no reply", host, ip.toString().c_str());
+  return false;
+}
+
+bool ntpSyncNow() {
+  return ntpQuery(NTP_SERVER_1) || ntpQuery(NTP_SERVER_2) || ntpQuery(NTP_SERVER_3);
 }
 
 void startNtp() {
@@ -75,23 +161,31 @@ void loadSettings() {
 }
 
 String getHtml() {
-  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><style>";
-  html += "body{font-family:sans-serif; background:#222; color:#fff; padding:20px;}";
-  html += ".btn{background:#007bff; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; margin:5px; border:none; cursor:pointer;}";
-  html += ".card{background:#333; padding:15px; border-radius:8px; margin-bottom:15px;}";
-  html += "input[type=number]{padding:8px; width:100px;}";
-  html += "input[type=range]{width:100%;}";
-  html += "</style></head><body><h2>GeekMagic Control</h2>";
+  String html = F("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>GeekMagic</title><style>"
+    ":root{--bg:#0d1117;--card:#161b22;--line:#30363d;--text:#e6edf3;--mute:#8b949e;--acc:#2f81f7;--ok:#238636}"
+    "*{box-sizing:border-box}body{margin:0;padding:24px 16px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}"
+    ".wrap{max-width:460px;margin:0 auto}h1{font-size:22px;margin:0 0 4px}.sub{color:var(--mute);margin-bottom:20px;font-size:13px}"
+    ".card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}"
+    "h3{margin:0 0 14px;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute)}"
+    "label{display:block;margin:12px 0 6px;font-size:13px;color:var(--mute)}"
+    "input[type=number],input[type=file]{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text)}"
+    "input[type=range]{width:100%;accent-color:var(--acc)}"
+    ".btn{width:100%;margin-top:16px;padding:11px;border:0;border-radius:8px;background:var(--acc);color:#fff;font-size:15px;font-weight:600;cursor:pointer}"
+    ".btn.ok{background:var(--ok)}.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}"
+    ".row{display:flex;justify-content:space-between;color:var(--mute);font-size:13px;padding:4px 0}.row b{color:var(--text);font-weight:500}"
+    "</style></head><body><div class='wrap'><h1>GeekMagic</h1><div class='sub'>Calendar display control</div>");
+  html += F("<div class='card'><h3>Status</h3><div id='st'><div class='row'>Loading...</div></div>"
+    "<a href='/log' target='_blank'><button class='btn ghost' type='button'>View log</button></a></div>");
   html += "<div class='card'><h3>Settings</h3><form action='/set' method='POST'>";
-  html += "Timezone Offset: <input type='number' name='offset' value='" + String(gmtOffset) + "'><br><br>";
-  html += "Brightness (" + String(brightness) + "%): <br>";
-  html += "<input type='range' name='bright' min='0' max='100' value='" + String(brightness) + "' onchange='this.form.submit()'><br><br>";
-  html += "<input type='submit' value='Save' class='btn'></form></div>";
-  html += "<div class='card'><h3>Update Firmware</h3>";
-  html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
-  html += "<input type='file' name='update' style='color:#fff'><br><br>";
-  html += "<input type='submit' value='Upload .bin' class='btn' style='background:#28a745'>";
-  html += "</form></div></body></html>";
+  html += "<label>Timezone offset (seconds)</label><input type='number' name='offset' value='" + String(gmtOffset) + "'>";
+  html += "<label>Brightness <b id='bv'>" + String(brightness) + "%</b></label>";
+  html += "<input type='range' name='bright' min='0' max='100' value='" + String(brightness) + "' oninput=\"bv.textContent=this.value+'%'\" onchange='this.form.submit()'>";
+  html += "<button class='btn' type='submit'>Save</button></form></div>";
+  html += F("<div class='card'><h3>Firmware update</h3><form method='POST' action='/update' enctype='multipart/form-data'>"
+    "<input type='file' name='update' accept='.bin'><button class='btn ok' type='submit'>Upload .bin</button></form></div></div>"
+    "<script>fetch('/status').then(r=>r.json()).then(j=>{const m=s=>Math.floor(s/60)+'m';"
+    "st.innerHTML=[['WiFi',j.ssid+' ('+j.rssi+' dBm)'],['Time synced',j.time_synced?'yes':'no'],['Last fetch',j.last_fetch],['Uptime',m(j.uptime_s)],['Free heap',j.heap+' B']]"
+    ".map(x=>\"<div class='row'>\"+x[0]+\"<b>\"+x[1]+\"</b></div>\").join('')}).catch(()=>{});</script></body></html>");
   return html;
 }
 
@@ -156,51 +250,74 @@ void drawClock() {
 }
 
 void fetchCalendar() {
-  if (WiFi.status() != WL_CONNECTED) { drawError("WiFi Lost"); return; }
+  if (WiFi.status() != WL_CONNECTED) { lastFetchResult = "WiFi lost"; logf("Fetch: WiFi lost"); drawError("WiFi Lost"); return; }
+  unsigned long t0 = millis();
   
-  std::unique_ptr<WiFiClientSecure>client(new WiFiClientSecure);
-  client->setInsecure();
-  
-  HTTPClient https;
-  https.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  https.setTimeout(15000); 
+  String payload;
+  int httpCode = 0;
+  bool began = false;
+  {
+    // Scoped so the TLS client (~20KB of RAM) is freed before JSON parsing
+    std::unique_ptr<WiFiClientSecure> client(new WiFiClientSecure);
+    client->setInsecure();
 
-  if (https.begin(*client, GOOGLE_SCRIPT_URL)) {
-    int httpCode = https.GET();
-    if (httpCode > 0) {
-      String payload = https.getString();
-      https.end(); 
-      DynamicJsonDocument doc(5120); 
-      DeserializationError error = deserializeJson(doc, payload);
+    HTTPClient https;
+    https.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    https.setTimeout(15000);
+    const char* hdrs[] = {"Date"};
+    https.collectHeaders(hdrs, 1);
 
-      if (!error) {
-        JsonArray array = doc.as<JsonArray>();
-        int count = 0;
-        for(int k=0; k<8; k++) events[k].title = ""; 
-        for(JsonObject v : array) {
-          if(count >= 8) break;
-          events[count].title = v["t"].as<String>();
-          events[count].displayTime = v["d"].as<String>();
-          events[count].color = v["c"].as<uint16_t>();
-          events[count].isDark = v["isDark"].as<bool>();
-          count++;
-        }
-        drawUI();
-      } else {
-        drawError("JSON: " + String(error.c_str()));
+    if (https.begin(*client, GOOGLE_SCRIPT_URL)) {
+      began = true;
+      httpCode = https.GET();
+      if (httpCode > 0) {
+        payload = https.getString();
+        if (!ntpOk && setTimeFromHttpDate(https.header("Date"))) logf("Time: set from HTTP Date header");
       }
-    } else {
-      drawError("HTTP " + String(httpCode));
       https.end();
     }
-  } else {
-    drawError("Connect Fail");
   }
+
+  if (!began) {
+    lastFetchResult = "connect fail";
+    logf("Fetch: connect fail");
+    drawError("Connect Fail");
+    return;
+  }
+  if (httpCode <= 0) {
+    lastFetchResult = "HTTP error " + String(httpCode);
+    logf("Fetch: HTTP error %d", httpCode);
+    drawError("HTTP " + String(httpCode));
+    return;
+  }
+
+  DynamicJsonDocument doc(3072);
+  DeserializationError error = deserializeJson(doc, payload);
+  lastFetchResult = "HTTP " + String(httpCode) + ", " + (error ? String("JSON ") + error.c_str() : String("ok")) + ", " + String(millis() - t0) + " ms";
+  logf("Fetch: %s (%u bytes, heap %u)", lastFetchResult.c_str(), payload.length(), ESP.getFreeHeap());
+  if (error) { drawError("JSON: " + String(error.c_str())); return; }
+
+  JsonArray array = doc.as<JsonArray>();
+  int count = 0;
+  for (int k = 0; k < 8; k++) events[k].title = "";
+  for (JsonObject v : array) {
+    if (count >= 8) break;
+    events[count].title = v["t"].as<String>();
+    events[count].displayTime = v["d"].as<String>();
+    events[count].color = v["c"].as<uint16_t>();
+    events[count].isDark = v["isDark"].as<bool>();
+    count++;
+  }
+  drawUI();
 }
 
 void setup() {
   Serial.begin(115200);
+  logf("Boot: reset reason '%s'", ESP.getResetReason().c_str());
   loadSettings();
+  WiFi.persistent(true);      // keep credentials in flash
+  WiFi.setAutoReconnect(true);
+  WiFi.mode(WIFI_STA);
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
@@ -211,7 +328,14 @@ void setup() {
   tft.drawString("Connecting...", 120, 120, 4);
 
   WiFiManager wifiManager;
-  wifiManager.setConnectTimeout(10);
+  wifiManager.setSaveConfigCallback([]() {
+    // User just entered WiFi details in the portal - reboot so they take effect cleanly
+    logf("WiFi: credentials entered, restarting");
+    delay(1000);
+    ESP.restart();
+  });
+  wifiManager.setConnectTimeout(30);        // slow routers / soft reboot after OTA need time
+  wifiManager.setConfigPortalTimeout(180);  // never sit in the portal forever
   wifiManager.setAPCallback([](WiFiManager*) {
     // Saved WiFi failed - device is now hosting its own setup network
     tft.fillScreen(TFT_BLACK);
@@ -223,17 +347,44 @@ void setup() {
     tft.drawString("GeekMagic_Setup", 120, 145, 4);
     tft.drawString("then open 192.168.4.1", 120, 185, 2);
   });
-  wifiManager.autoConnect("GeekMagic_Setup");
+  logf("WiFi: connecting (saved SSID '%s')", WiFi.SSID().c_str());
+#ifdef WIFI_SSID_SECRET
+  // Built-in credentials survive any OTA/flash wipe; the portal is only the last resort
+  WiFi.begin(WIFI_SSID_SECRET, WIFI_PASS_SECRET);
+  for (int i = 0; i < 200 && WiFi.status() != WL_CONNECTED; i++) delay(100);
+  logf("WiFi: built-in credentials %s", WiFi.status() == WL_CONNECTED ? "ok" : "failed");
+#endif
+  if (!wifiManager.autoConnect("GeekMagic_Setup")) {
+    logf("WiFi: portal timed out, restarting to retry saved WiFi");
+    delay(500);
+    ESP.restart();
+  }
+  logf("WiFi: connected %s rssi=%d ip=%s", WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Syncing time...", 120, 120, 4);
   startNtp();
-  for (int i = 0; i < 80 && !timeIsSynced(); i++) delay(100); // wait up to 8s for NTP; loop() keeps retrying
+  unsigned long ntpStart = millis();
+  ntpQuery(NTP_SERVER_1); // one quick try; if blocked, the HTTP Date header sets the clock on first fetch
+  logf("NTP: %s after %lu ms", timeIsSynced() ? "synced" : "pending (HTTP Date fallback)", millis() - ntpStart);
   tft.fillScreen(TFT_BLACK);
 
   server.on("/", []() { server.send(200, "text/html", getHtml()); });
+  server.on("/log", []() { server.send(200, "text/plain", logBuf); });
+  server.on("/status", []() {
+    String j = "{\"uptime_s\":" + String(millis() / 1000);
+    j += ",\"heap\":" + String(ESP.getFreeHeap());
+    j += ",\"rssi\":" + String(WiFi.RSSI());
+    j += ",\"ssid\":\"" + WiFi.SSID() + "\"";
+    j += ",\"time_synced\":" + String(timeIsSynced() ? "true" : "false");
+    j += ",\"epoch\":" + String((long)time(nullptr));
+    j += ",\"last_fetch\":\"" + lastFetchResult + "\"";
+    j += ",\"reset_reason\":\"" + ESP.getResetReason() + "\"}";
+    server.send(200, "application/json", j);
+  });
+  server.on("/restart", []() { server.send(200, "text/plain", "Restarting"); delay(300); ESP.restart(); });
   server.on("/set", HTTP_POST, []() {
       if (server.hasArg("offset")) gmtOffset = server.arg("offset").toInt();
       if (server.hasArg("bright")) brightness = server.arg("bright").toInt();
@@ -274,9 +425,14 @@ void loop() {
   server.handleClient();
   static unsigned long lastClock = 0;
   static unsigned long lastNtpRetry = 0;
-  if (!timeIsSynced() && WiFi.status() == WL_CONNECTED && millis() - lastNtpRetry > 30000) {
+  if (!ntpOk && WiFi.status() == WL_CONNECTED && millis() - lastNtpRetry > 600000UL) {
     lastNtpRetry = millis();
-    startNtp(); // re-issue NTP request until the first sync succeeds
+    ntpQuery(NTP_SERVER_1); // retry NTP every 10 min; meanwhile fetches keep time via HTTP Date
+  }
+  static unsigned long lastResync = 0;
+  if (ntpOk && millis() - lastResync > 3600000UL) {
+    lastResync = millis();
+    ntpQuery(NTP_SERVER_1); // hourly drift correction
   }
   if (millis() - lastClock > 1000) {
     lastClock = millis();
