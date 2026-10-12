@@ -132,6 +132,31 @@ bool ntpSyncNow() {
   return ntpQuery(NTP_SERVER_1) || ntpQuery(NTP_SERVER_2) || ntpQuery(NTP_SERVER_3);
 }
 
+void saveSettings();
+
+// Timezone follows the device's location: ask ip-api.com for the UTC offset of our public IP
+bool updateTimezone() {
+  WiFiClient c;
+  HTTPClient http;
+  http.setTimeout(5000);
+  if (!http.begin(c, "http://ip-api.com/line/?fields=offset")) return false;
+  int code = http.GET();
+  if (code == 200) {
+    String body = http.getString();
+    body.trim();
+    long off = body.toInt();
+    if (body.length() > 0 && off > -43200 && off < 50400) {
+      if (off != gmtOffset) { gmtOffset = off; saveSettings(); }
+      logf("TZ: offset %ld s from IP location", off);
+      http.end();
+      return true;
+    }
+  }
+  logf("TZ: lookup failed (HTTP %d), keeping %ld s", code, gmtOffset);
+  http.end();
+  return false;
+}
+
 void startNtp() {
   configTime(gmtOffset, 0, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
 }
@@ -177,7 +202,6 @@ String getHtml() {
   html += F("<div class='card'><h3>Status</h3><div id='st'><div class='row'>Loading...</div></div>"
     "<a href='/log' target='_blank'><button class='btn ghost' type='button'>View log</button></a></div>");
   html += "<div class='card'><h3>Settings</h3><form action='/set' method='POST'>";
-  html += "<label>Timezone offset (seconds)</label><input type='number' name='offset' value='" + String(gmtOffset) + "'>";
   html += "<label>Brightness <b id='bv'>" + String(brightness) + "%</b></label>";
   html += "<input type='range' name='bright' min='0' max='100' value='" + String(brightness) + "' oninput=\"bv.textContent=this.value+'%'\" onchange='this.form.submit()'>";
   html += "<button class='btn' type='submit'>Save</button></form></div>";
@@ -365,6 +389,7 @@ void setup() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Syncing time...", 120, 120, 4);
+  updateTimezone();
   startNtp();
   unsigned long ntpStart = millis();
   ntpQuery(NTP_SERVER_1); // one quick try; if blocked, the HTTP Date header sets the clock on first fetch
@@ -386,7 +411,6 @@ void setup() {
   });
   server.on("/restart", []() { server.send(200, "text/plain", "Restarting"); delay(300); ESP.restart(); });
   server.on("/set", HTTP_POST, []() {
-      if (server.hasArg("offset")) gmtOffset = server.arg("offset").toInt();
       if (server.hasArg("bright")) brightness = server.arg("bright").toInt();
       saveSettings();
       applyBrightness(); 
@@ -428,6 +452,11 @@ void loop() {
   if (!ntpOk && WiFi.status() == WL_CONNECTED && millis() - lastNtpRetry > 600000UL) {
     lastNtpRetry = millis();
     ntpQuery(NTP_SERVER_1); // retry NTP every 10 min; meanwhile fetches keep time via HTTP Date
+  }
+  static unsigned long lastTz = 0;
+  if (WiFi.status() == WL_CONNECTED && millis() - lastTz > 6UL * 3600000UL) {
+    lastTz = millis();
+    if (updateTimezone()) startNtp(); // re-apply offset if we moved
   }
   static unsigned long lastResync = 0;
   if (ntpOk && millis() - lastResync > 3600000UL) {
