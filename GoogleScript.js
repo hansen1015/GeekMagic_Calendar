@@ -24,7 +24,7 @@ function doGet(e) {
     var rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 
     var start = evt.getStartTime();
-    var timeStr = start.toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit', hour12: false});
+    var timeStr = start.toLocaleTimeString('en-US', {hour: 'numeric', minute:'2-digit', hour12: true});
     
     var dateStr = "";
     if (start.getDate() == now.getDate()) {

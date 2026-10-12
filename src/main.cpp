@@ -258,10 +258,11 @@ void drawClock() {
   if (timeIsSynced()) {
     time_t now = time(nullptr);
     struct tm* p_tm = localtime(&now);
-    sprintf(timeStr, "%02d:%02d", p_tm->tm_hour, p_tm->tm_min);
+    int h12 = p_tm->tm_hour % 12;
+    sprintf(timeStr, "%d:%02d %s", h12 == 0 ? 12 : h12, p_tm->tm_min, p_tm->tm_hour < 12 ? "AM" : "PM");
     strftime(dateStr, sizeof(dateStr), "%b %d", p_tm);
   } else {
-    strcpy(timeStr, "--:--");
+    strcpy(timeStr, "--:-- --");
     strcpy(dateStr, "Syncing");
   }
 
